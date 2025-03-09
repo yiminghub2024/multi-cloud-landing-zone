@@ -605,4 +605,218 @@ function generateTerraformConfig(config) {
 }
 
 `;
-  } else if (cloudProvider<response clipped><NOTE>To save on context only part of this file has been shown to you. You should retry this tool after you have searched inside the file with `grep -n` in order to find the line numbers of what you are looking for.</NOTE>
+  } else if (cloudProvider === 'azure') {
+    terraformConfig += `resource "azurerm_virtual_network" "${vpc.name}" {
+  name                = "${vpc.name}"
+  address_space       = ["${vpc.cidr}"]
+  location            = "${region}"
+  resource_group_name = "resource-group-name"
+}
+
+`;
+  } else {
+    terraformConfig += `resource "${cloudProvider}_vpc" "${vpc.name}" {
+  name       = "${vpc.name}"
+  cidr_block = "${vpc.cidr}"
+}
+
+`;
+  }
+  
+  // 添加子网配置
+  if (cloudProvider === 'aws') {
+    terraformConfig += `resource "aws_subnet" "${subnet.name}" {
+  vpc_id                  = aws_vpc.${vpc.name}.id
+  cidr_block              = "${subnet.cidr}"
+  availability_zone       = "${az}"
+  map_public_ip_on_launch = ${subnet.mapPublicIpOnLaunch || false}
+  
+  tags = {
+    Name = "${subnet.name}"
+  }
+}
+
+`;
+  } else if (cloudProvider === 'azure') {
+    terraformConfig += `resource "azurerm_subnet" "${subnet.name}" {
+  name                 = "${subnet.name}"
+  resource_group_name  = "resource-group-name"
+  virtual_network_name = azurerm_virtual_network.${vpc.name}.name
+  address_prefixes     = ["${subnet.cidr}"]
+}
+
+`;
+  } else {
+    terraformConfig += `resource "${cloudProvider}_subnet" "${subnet.name}" {
+  vpc_id     = ${cloudProvider}_vpc.${vpc.name}.id
+  cidr_block = "${subnet.cidr}"
+  zone_id    = "${az}"
+}
+
+`;
+  }
+  
+  // 添加选定的组件
+  components.forEach(component => {
+    const props = componentProperties[component.value] || {};
+    
+    switch(component.value) {
+      case 'load-balancer':
+        if (cloudProvider === 'aws') {
+          terraformConfig += `resource "aws_lb" "load_balancer" {
+  name               = "${component.name}-${vpc.name}"
+  internal           = false
+  load_balancer_type = "application"
+  subnets            = [aws_subnet.${subnet.name}.id]
+  
+  enable_deletion_protection = false
+}
+
+resource "aws_lb_listener" "front_end" {
+  load_balancer_arn = aws_lb.load_balancer.arn
+  port              = "${props.listener_port || '80'}"
+  protocol          = "HTTP"
+  
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.front_end.arn
+  }
+}
+
+resource "aws_lb_target_group" "front_end" {
+  name     = "tf-lb-tg"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.${vpc.name}.id
+}
+
+`;
+        }
+        break;
+      
+      case 'object-storage':
+        if (cloudProvider === 'aws') {
+          const bucketName = props.bucket_name || `${vpc.name}-bucket`;
+          terraformConfig += `resource "aws_s3_bucket" "storage_bucket" {
+  bucket = "${bucketName}"
+  
+  tags = {
+    Name = "${bucketName}"
+  }
+}
+
+`;
+        }
+        break;
+      
+      case 'rds':
+        if (cloudProvider === 'aws') {
+          terraformConfig += `resource "aws_db_instance" "database" {
+  allocated_storage    = ${props.storage_size || '20'}
+  engine               = "${props.engine || 'mysql'}"
+  engine_version       = "5.7"
+  instance_class       = "db.t3.${props.instance_type || 'small'}"
+  name                 = "mydb"
+  username             = "admin"
+  password             = "password"
+  parameter_group_name = "default.mysql5.7"
+  skip_final_snapshot  = true
+  db_subnet_group_name = aws_db_subnet_group.default.name
+}
+
+resource "aws_db_subnet_group" "default" {
+  name       = "main"
+  subnet_ids = [aws_subnet.${subnet.name}.id]
+}
+
+`;
+        }
+        break;
+      
+      case 'compute':
+        if (cloudProvider === 'aws') {
+          terraformConfig += `resource "aws_instance" "web" {
+  count         = ${props.instance_count || '2'}
+  ami           = "ami-0c55b159cbfafe1f0"
+  instance_type = "t3.${props.instance_type || 'medium'}"
+  subnet_id     = aws_subnet.${subnet.name}.id
+  
+  tags = {
+    Name = "WebServer-\${count.index + 1}"
+  }
+}
+
+`;
+        }
+        break;
+      
+      // 其他组件...
+    }
+  });
+  
+  return terraformConfig;
+}
+
+// 生成拓扑图数据
+function generateTopology(config) {
+  const { cloudProvider, region, az, vpc, subnet, components } = config;
+  
+  // 这里只是生成一个简单的拓扑图数据结构
+  // 实际应用中可能需要更复杂的逻辑来生成可视化拓扑图
+  
+  const nodes = [
+    {
+      id: 'vpc',
+      type: 'vpc',
+      name: vpc.name,
+      data: {
+        cidr: vpc.cidr
+      }
+    },
+    {
+      id: 'subnet',
+      type: 'subnet',
+      name: subnet.name,
+      data: {
+        cidr: subnet.cidr,
+        az: az
+      }
+    }
+  ];
+  
+  const edges = [
+    {
+      source: 'vpc',
+      target: 'subnet',
+      type: 'contains'
+    }
+  ];
+  
+  // 添加组件节点
+  components.forEach((component, index) => {
+    const nodeId = `component-${index}`;
+    
+    nodes.push({
+      id: nodeId,
+      type: component.value,
+      name: component.name,
+      data: {}
+    });
+    
+    edges.push({
+      source: 'subnet',
+      target: nodeId,
+      type: 'contains'
+    });
+  });
+  
+  return {
+    nodes,
+    edges
+  };
+}
+
+// 启动服务器
+app.listen(port, () => {
+  console.log(`后端服务器运行在 http://localhost:${port}`) ;
+});
